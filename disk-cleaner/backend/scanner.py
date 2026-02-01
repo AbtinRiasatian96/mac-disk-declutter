@@ -1,10 +1,12 @@
 """Filesystem scanning logic."""
 
 import glob as globmod
+import json
 import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Generator
 
 
 def human_size(size_bytes: int) -> str:
@@ -63,7 +65,7 @@ def get_homebrew_cache() -> str | None:
 
 def _make_item(path: Path, name: str, size: int, category: str, type_: str = "folder",
                parent: str | None = None, item_count: int | None = None,
-               tag: str | None = None) -> dict:
+               tag: str | None = None, section: str = "known") -> dict:
     """Helper to build a scan result dict."""
     item = {
         "path": str(path),
@@ -75,6 +77,7 @@ def _make_item(path: Path, name: str, size: int, category: str, type_: str = "fo
         "last_modified": get_last_modified(path),
         "parent": parent or str(path.parent),
         "item_count": item_count if item_count is not None else (get_item_count(path) if path.is_dir() else 1),
+        "section": section,
     }
     if tag:
         item["tag"] = tag
@@ -89,7 +92,6 @@ def scan_location(path_str: str, category: str) -> list[dict]:
 
     items = []
 
-    # Directories to always break down into top-level children
     EXPAND_DIRS = {"Downloads", ".Trash", "Movies", "steamapps"}
 
     if path.name in EXPAND_DIRS:
@@ -159,7 +161,6 @@ def scan_location(path_str: str, category: str) -> list[dict]:
 # --- Deep scan: node_modules, .git, large log files ---
 
 def _find_node_modules(base_dirs: list[str]) -> list[dict]:
-    """Find node_modules directories under project dirs."""
     results = []
     seen = set()
     for dir_str in base_dirs:
@@ -167,14 +168,13 @@ def _find_node_modules(base_dirs: list[str]) -> list[dict]:
         if not base.exists():
             continue
         for root, dirs, _files in os.walk(base, followlinks=False):
-            # Don't recurse into node_modules or .git
             dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv")]
             nm = Path(root) / "node_modules"
             if nm.is_dir() and str(nm) not in seen:
                 seen.add(str(nm))
                 try:
                     size = get_dir_size(nm)
-                    if size > 1_000_000:  # >1MB
+                    if size > 1_000_000:
                         project_name = Path(root).name
                         results.append(_make_item(
                             nm, f"node_modules ({project_name})", size, "safe",
@@ -186,7 +186,6 @@ def _find_node_modules(base_dirs: list[str]) -> list[dict]:
 
 
 def _find_large_git(base_dirs: list[str], min_bytes: int = 500_000_000) -> list[dict]:
-    """Find .git directories over a size threshold."""
     results = []
     seen = set()
     for dir_str in base_dirs:
@@ -198,7 +197,7 @@ def _find_large_git(base_dirs: list[str], min_bytes: int = 500_000_000) -> list[
             git_dir = Path(root) / ".git"
             if git_dir.is_dir() and str(git_dir) not in seen:
                 seen.add(str(git_dir))
-                dirs[:] = [d for d in dirs if d != ".git"]  # don't recurse into .git
+                dirs[:] = [d for d in dirs if d != ".git"]
                 try:
                     size = get_dir_size(git_dir)
                     if size > min_bytes:
@@ -213,7 +212,6 @@ def _find_large_git(base_dirs: list[str], min_bytes: int = 500_000_000) -> list[
 
 
 def _find_log_files(base_dirs: list[str], min_bytes: int = 10_000_000) -> list[dict]:
-    """Find *.log files over a threshold in project dirs."""
     results = []
     seen = set()
     for dir_str in base_dirs:
@@ -241,7 +239,6 @@ def _find_log_files(base_dirs: list[str], min_bytes: int = 10_000_000) -> list[d
 
 
 def _find_large_files(min_bytes: int, extensions: list[str]) -> list[dict]:
-    """Scan home directory for files > min_bytes with certain extensions."""
     results = []
     home = Path.home()
     skip_dirs = {
@@ -251,14 +248,12 @@ def _find_large_files(min_bytes: int, extensions: list[str]) -> list[dict]:
     ext_set = set(extensions)
 
     for root, dirs, files in os.walk(home, followlinks=False):
-        # Skip system/hidden dirs at top level and always skip certain dirs
         rel = Path(root).relative_to(home)
         dirs[:] = [d for d in dirs if d not in skip_dirs and not (
             rel == Path(".") and d.startswith(".") and d not in (".Trash",)
         )]
         for f in files:
             fp = Path(root) / f
-            # Check extension (handle .tar.gz etc)
             matches = any(f.endswith(ext) for ext in ext_set)
             if not matches:
                 continue
@@ -275,7 +270,6 @@ def _find_large_files(min_bytes: int, extensions: list[str]) -> list[dict]:
 
 
 def _find_container_caches() -> list[dict]:
-    """Scan ~/Library/Containers/*/Data/Library/Caches for app sandbox caches."""
     results = []
     containers = Path.home() / "Library" / "Containers"
     if not containers.exists():
@@ -287,7 +281,7 @@ def _find_container_caches() -> list[dict]:
             cache_dir = Path(entry.path) / "Data" / "Library" / "Caches"
             if cache_dir.is_dir():
                 size = get_dir_size(cache_dir)
-                if size > 5_000_000:  # >5MB
+                if size > 5_000_000:
                     app_name = entry.name.split(".")[-1] if "." in entry.name else entry.name
                     results.append(_make_item(
                         cache_dir, f"{app_name} container cache", size, "safe",
@@ -298,12 +292,166 @@ def _find_container_caches() -> list[dict]:
     return results
 
 
+# --- Full home directory size crawler ("Find Space Hogs") ---
+
+def _get_top_level_dirs_with_size(base: Path, skip: set[str]) -> list[tuple[Path, int]]:
+    """Get immediate children of base with their total sizes, skipping named dirs."""
+    results = []
+    try:
+        for entry in os.scandir(base):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name in skip:
+                continue
+            try:
+                size = get_dir_size(Path(entry.path))
+                results.append((Path(entry.path), size))
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    return results
+
+
+def discover_space_hogs(min_bytes: int = 100_000_000, top_n: int = 50,
+                        progress_callback=None) -> list[dict]:
+    """Crawl ~/ to find the top N largest directories (>min_bytes).
+
+    Uses a two-pass approach:
+    1. Scan top-level dirs under ~/ to get coarse sizes
+    2. For large ones, drill into children to find the actual hogs
+
+    progress_callback(phase, current, total, message) is called for progress updates.
+    """
+    home = Path.home()
+    # Dirs to skip entirely (system, already covered by known scan)
+    skip_top = {".Trash", ".cache", ".npm", ".cargo", ".rustup", ".gradle",
+                ".m2", ".cocoapods", ".pub-cache", ".gem", ".nuget", "go"}
+
+    # Phase 1: size top-level dirs
+    if progress_callback:
+        progress_callback("crawl", 0, 1, "Measuring top-level directories...")
+
+    top_dirs = []
+    try:
+        entries = list(os.scandir(home))
+    except (PermissionError, OSError):
+        entries = []
+
+    total_entries = len(entries)
+    for i, entry in enumerate(entries):
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if entry.name in skip_top:
+            continue
+        if progress_callback:
+            progress_callback("crawl", i + 1, total_entries, f"Sizing ~/{entry.name}...")
+        try:
+            size = get_dir_size(Path(entry.path))
+            if size >= min_bytes:
+                top_dirs.append((Path(entry.path), size))
+        except (PermissionError, OSError):
+            continue
+
+    # Phase 2: for each large dir, drill into children
+    all_hogs: list[tuple[Path, int]] = []
+    # Also include Library subdirs which are often huge
+    library = home / "Library"
+    if library.exists():
+        if progress_callback:
+            progress_callback("drill", 0, 1, "Drilling into ~/Library...")
+        lib_children = _get_top_level_dirs_with_size(library, set())
+        for p, s in lib_children:
+            if s >= min_bytes:
+                all_hogs.append((p, s))
+
+    drill_dirs = [(p, s) for p, s in top_dirs if p.name != "Library"]
+    for i, (dir_path, dir_size) in enumerate(drill_dirs):
+        if progress_callback:
+            progress_callback("drill", i + 1, len(drill_dirs),
+                              f"Drilling into ~/{dir_path.name}...")
+        # Get children
+        children = _get_top_level_dirs_with_size(dir_path, {"node_modules", ".git", "__pycache__"})
+        large_children = [(p, s) for p, s in children if s >= min_bytes]
+        if large_children:
+            all_hogs.extend(large_children)
+        else:
+            # No large children individually — show the dir itself
+            all_hogs.append((dir_path, dir_size))
+
+    # Also find large individual files anywhere under ~/
+    if progress_callback:
+        progress_callback("files", 0, 1, "Scanning for large files (>500MB)...")
+    large_file_exts = {
+        ".iso", ".dmg", ".zip", ".tar.gz", ".tgz", ".tar.bz2",
+        ".mov", ".mp4", ".avi", ".mkv", ".pkg", ".rar", ".7z",
+        ".vmdk", ".vdi", ".qcow2", ".ova", ".docker", ".img",
+    }
+    large_files: list[tuple[Path, int]] = []
+    skip_walk = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
+    for root, dirs, files in os.walk(home, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in skip_walk]
+        for f in files:
+            if any(f.endswith(ext) for ext in large_file_exts):
+                fp = Path(root) / f
+                try:
+                    size = fp.stat(follow_symlinks=False).st_size
+                    if size >= 500_000_000:  # 500MB
+                        large_files.append((fp, size))
+                except (PermissionError, OSError):
+                    continue
+
+    # Deduplicate: remove hogs that are parents/children of each other, keep deepest
+    all_hogs.sort(key=lambda x: len(str(x[0])), reverse=True)  # deepest first
+    seen_paths: set[str] = set()
+    deduped: list[tuple[Path, int]] = []
+    # Collect all known-scan paths to exclude from discovered section
+    # (these are already shown in the "Known Safe Items" section)
+
+    for p, s in all_hogs:
+        sp = str(p)
+        # Skip if a child path is already included
+        if any(sp.startswith(seen) or seen.startswith(sp) for seen in seen_paths):
+            continue
+        seen_paths.add(sp)
+        deduped.append((p, s))
+
+    # Sort by size descending, take top N
+    deduped.sort(key=lambda x: x[1], reverse=True)
+    deduped = deduped[:top_n]
+
+    # Convert to items
+    items = []
+    for p, s in deduped:
+        # Categorize heuristically
+        sp = str(p)
+        if "Cache" in sp or "cache" in sp or "Logs" in sp or "logs" in sp or "DerivedData" in sp:
+            cat = "safe"
+        elif "Library" in sp:
+            cat = "review"
+        else:
+            cat = "review"  # discovered items default to review
+        items.append(_make_item(
+            p, p.name, s, cat, section="discovered", tag="space_hog",
+            parent=str(p.parent),
+        ))
+
+    # Add large files
+    for p, s in large_files:
+        items.append(_make_item(
+            p, p.name, s, "personal", type_="file",
+            section="discovered", tag="large_file", parent=str(p.parent),
+        ))
+
+    items.sort(key=lambda x: x["size"], reverse=True)
+    return items[:top_n]
+
+
 def scan_all(config: dict, deep: bool = False) -> list[dict]:
     """Scan all configured locations and return aggregated items."""
     locations = config.get("scan_locations", {})
     all_items = []
 
-    # Check for homebrew cache
     brew_cache = get_homebrew_cache()
     safe_locs = list(locations.get("safe", []))
     if brew_cache and brew_cache not in safe_locs:
@@ -318,7 +466,6 @@ def scan_all(config: dict, deep: bool = False) -> list[dict]:
     for path_str in locations.get("personal", []):
         all_items.extend(scan_location(path_str, "personal"))
 
-    # Container caches (glob pattern)
     all_items.extend(_find_container_caches())
 
     if deep:
@@ -331,8 +478,101 @@ def scan_all(config: dict, deep: bool = False) -> list[dict]:
         extensions = config.get("large_file_extensions", [])
         all_items.extend(_find_large_files(min_bytes, extensions))
 
-    # Sort by ROI: size * safety_weight (safe=1.0, review=0.6, personal=0.3)
     weight = {"safe": 1.0, "review": 0.6, "personal": 0.3}
     all_items.sort(key=lambda x: x["size"] * weight.get(x["category"], 0.5), reverse=True)
 
     return all_items
+
+
+def scan_all_streaming(config: dict, deep: bool = False) -> Generator[str, None, None]:
+    """Like scan_all but yields SSE events for progress updates.
+
+    Yields lines in SSE format: "data: {json}\n\n"
+    Final event has type "done" with full results.
+    """
+    def sse(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
+
+    yield sse({"type": "progress", "phase": "known", "message": "Scanning known locations..."})
+
+    locations = config.get("scan_locations", {})
+    known_items = []
+
+    brew_cache = get_homebrew_cache()
+    safe_locs = list(locations.get("safe", []))
+    if brew_cache and brew_cache not in safe_locs:
+        safe_locs.append(brew_cache)
+
+    total_locs = len(safe_locs) + len(locations.get("review", [])) + len(locations.get("personal", []))
+    scanned = 0
+
+    for path_str in safe_locs:
+        scanned += 1
+        yield sse({"type": "progress", "phase": "known", "current": scanned, "total": total_locs,
+                    "message": f"Scanning {path_str}..."})
+        known_items.extend(scan_location(path_str, "safe"))
+
+    for path_str in locations.get("review", []):
+        scanned += 1
+        yield sse({"type": "progress", "phase": "known", "current": scanned, "total": total_locs,
+                    "message": f"Scanning {path_str}..."})
+        known_items.extend(scan_location(path_str, "review"))
+
+    for path_str in locations.get("personal", []):
+        scanned += 1
+        yield sse({"type": "progress", "phase": "known", "current": scanned, "total": total_locs,
+                    "message": f"Scanning {path_str}..."})
+        known_items.extend(scan_location(path_str, "personal"))
+
+    yield sse({"type": "progress", "phase": "known", "message": "Scanning container caches..."})
+    known_items.extend(_find_container_caches())
+
+    discovered_items = []
+    if deep:
+        deep_dirs = config.get("deep_scan_dirs", [])
+
+        yield sse({"type": "progress", "phase": "deep", "message": "Finding node_modules..."})
+        known_items.extend(_find_node_modules(deep_dirs))
+
+        yield sse({"type": "progress", "phase": "deep", "message": "Finding large .git repos..."})
+        known_items.extend(_find_large_git(deep_dirs))
+
+        yield sse({"type": "progress", "phase": "deep", "message": "Finding large log files..."})
+        known_items.extend(_find_log_files(deep_dirs))
+
+        yield sse({"type": "progress", "phase": "deep", "message": "Finding large files..."})
+        min_bytes = config.get("large_file_min_bytes", 500_000_000)
+        extensions = config.get("large_file_extensions", [])
+        known_items.extend(_find_large_files(min_bytes, extensions))
+
+        # Space hogs discovery
+        yield sse({"type": "progress", "phase": "discover", "message": "Discovering space hogs across ~/..."})
+
+        def progress_cb(phase, current, total, message):
+            pass  # Can't yield from callback, but we send updates before/after
+
+        discovered_items = discover_space_hogs(
+            min_bytes=100_000_000, top_n=50, progress_callback=None,
+        )
+
+        # Remove discovered items that overlap with known items
+        known_paths = {item["path"] for item in known_items}
+        discovered_items = [
+            item for item in discovered_items
+            if item["path"] not in known_paths
+            and not any(item["path"].startswith(kp + "/") or kp.startswith(item["path"] + "/")
+                        for kp in known_paths)
+        ]
+
+    # Sort known items by ROI
+    weight = {"safe": 1.0, "review": 0.6, "personal": 0.3}
+    known_items.sort(key=lambda x: x["size"] * weight.get(x["category"], 0.5), reverse=True)
+    discovered_items.sort(key=lambda x: x["size"], reverse=True)
+
+    yield sse({
+        "type": "done",
+        "known_items": known_items,
+        "discovered_items": discovered_items,
+        "known_count": len(known_items),
+        "discovered_count": len(discovered_items),
+    })

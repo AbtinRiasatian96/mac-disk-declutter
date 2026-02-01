@@ -23,7 +23,11 @@
                     <button id="btn-scan" class="btn-primary">Quick Scan</button>
                     <button id="btn-deep-scan" class="btn-secondary">Deep Scan</button>
                 </div>
-                <p class="scan-hint">Quick: known cache/log locations. Deep: also searches projects for node_modules, large files, bloated .git repos.</p>
+                <p class="scan-hint">Quick: known cache/log locations. Deep: also crawls ~/ to discover space hogs, node_modules, large files, and bloated .git repos.</p>
+                <div id="progress-bar-container" class="hidden">
+                    <div id="progress-bar"><div id="progress-fill"></div></div>
+                    <div id="progress-text"></div>
+                </div>
                 <div id="scan-status" class="status-text"></div>
             </div>
 
@@ -38,7 +42,17 @@
                         </select>
                     </div>
                 </div>
-                <div id="results-list"></div>
+
+                <div id="known-section">
+                    <h2 class="section-title">Known Safe Items</h2>
+                    <div id="known-list" class="results-list"></div>
+                </div>
+
+                <div id="discovered-section" class="hidden">
+                    <h2 class="section-title">Discovered Space Hogs</h2>
+                    <p class="section-subtitle">Large directories and files found by crawling ~/</p>
+                    <div id="discovered-list" class="results-list"></div>
+                </div>
             </div>
         </main>
 
