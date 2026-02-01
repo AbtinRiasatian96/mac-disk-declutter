@@ -19,7 +19,11 @@
 
         <main>
             <div id="scan-section">
-                <button id="btn-scan" class="btn-primary">Scan Disk</button>
+                <div class="scan-buttons">
+                    <button id="btn-scan" class="btn-primary">Quick Scan</button>
+                    <button id="btn-deep-scan" class="btn-secondary">Deep Scan</button>
+                </div>
+                <p class="scan-hint">Quick: known cache/log locations. Deep: also searches projects for node_modules, large files, bloated .git repos.</p>
                 <div id="scan-status" class="status-text"></div>
             </div>
 

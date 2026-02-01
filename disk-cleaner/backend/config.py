@@ -33,16 +33,27 @@ DEFAULT_CONFIG = {
             "~/.cocoapods/repos",
             "~/Library/Saved Application State",
             "~/Library/Caches/com.spotify.client/Data",
-            "/private/var/folders",
             "~/.cache",
+            "~/.pub-cache",
+            "~/.gem",
+            "~/go/pkg/mod/cache",
+            "~/.nuget/packages",
+            # Browser caches
+            "~/Library/Caches/Google/Chrome",
+            "~/Library/Caches/com.apple.Safari",
+            "~/Library/Caches/Firefox",
+            "~/Library/Caches/com.microsoft.Edge",
+            # System junk
+            "~/Library/Application Support/CrashReporter",
         ],
         "review": [
             "~/Library/Developer/CoreSimulator",
             "~/Library/Application Support/MobileSync/Backup",
-            "~/Library/Mail/V*/MailData/Envelope Index-shm",
             "~/Library/Messages/Attachments",
+            "~/Library/Application Support/Slack/Cache",
             "~/Library/Application Support/Slack/Service Worker/CacheStorage",
             "~/Library/Application Support/discord/Cache",
+            "~/Library/Application Support/Spotify/PersistentCache",
             "~/Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage",
             "~/Library/Application Support/Code/CachedData",
             "~/Library/Application Support/Code/Cache",
@@ -55,6 +66,22 @@ DEFAULT_CONFIG = {
             "~/Movies",
         ],
     },
+    "deep_scan_dirs": [
+        "~/Documents",
+        "~/Projects",
+        "~/Developer",
+        "~/code",
+        "~/repos",
+        "~/src",
+        "~/workspace",
+        "~/dev",
+    ],
+    "large_file_min_bytes": 500_000_000,  # 500MB
+    "large_file_extensions": [
+        ".iso", ".dmg", ".zip", ".tar.gz", ".tgz", ".tar.bz2",
+        ".mov", ".mp4", ".avi", ".mkv", ".pkg", ".rar", ".7z",
+        ".vmdk", ".vdi", ".qcow2", ".ova",
+    ],
 }
 
 

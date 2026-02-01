@@ -24,7 +24,9 @@ def index():
 def api_scan():
     global scan_results
     config = load_config()
-    items = scan_all(config)
+    data = request.json or {}
+    deep = data.get("deep", False)
+    items = scan_all(config, deep=deep)
 
     # Try LLM analysis; fall back to heuristic scores if unavailable
     try:

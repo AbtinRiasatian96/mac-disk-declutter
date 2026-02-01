@@ -20,27 +20,47 @@ function safetyIcon(category) {
 function typeIcon(type) {
     return type === 'folder' ? '\u{1F4C1}' : '\u{1F4C4}';
 }
+function tagLabel(tag) {
+    const labels = {
+        node_modules: 'node_modules',
+        large_git: 'large .git',
+        log_file: 'log file',
+        large_file: 'large file',
+        container_cache: 'app cache',
+    };
+    return labels[tag] || '';
+}
 
 // --- Scan ---
-$('#btn-scan').addEventListener('click', async () => {
-    const btn = $('#btn-scan');
+async function doScan(deep) {
+    const btn = deep ? $('#btn-deep-scan') : $('#btn-scan');
     const status = $('#scan-status');
-    btn.disabled = true;
-    status.innerHTML = '<span class="spinner"></span> Scanning and analyzing...';
+    $('#btn-scan').disabled = true;
+    $('#btn-deep-scan').disabled = true;
+    status.innerHTML = '<span class="spinner"></span> ' +
+        (deep ? 'Deep scanning (this may take a while)...' : 'Scanning and analyzing...');
 
     try {
-        const resp = await fetch(API + '/api/scan', { method: 'POST' });
+        const resp = await fetch(API + '/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deep }),
+        });
         const data = await resp.json();
         scanResults = data.items;
         renderResults();
         $('#scan-section').querySelector('.status-text').textContent =
-            `Found ${data.count} items`;
+            `Found ${data.count} items` + (deep ? ' (deep scan)' : '');
         $('#results-section').classList.remove('hidden');
     } catch (e) {
         status.textContent = 'Scan failed: ' + e.message;
     }
-    btn.disabled = false;
-});
+    $('#btn-scan').disabled = false;
+    $('#btn-deep-scan').disabled = false;
+}
+
+$('#btn-scan').addEventListener('click', () => doScan(false));
+$('#btn-deep-scan').addEventListener('click', () => doScan(true));
 
 // --- Render Results ---
 function renderResults() {
@@ -52,17 +72,20 @@ function renderResults() {
     scanResults.forEach((item, idx) => {
         const row = document.createElement('div');
         row.className = 'result-item';
+        const tag = item.tag ? `<span class="item-tag">${tagLabel(item.tag)}</span>` : '';
+        const escapedPath = item.path.replace(/"/g, '&quot;');
+        const escapedName = item.name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         row.innerHTML = `
-            <input type="checkbox" data-idx="${idx}" data-path="${item.path}" data-size="${item.size}">
+            <input type="checkbox" data-idx="${idx}" data-path="${escapedPath}" data-size="${item.size}">
             <span class="item-icon">${typeIcon(item.type)}</span>
             <div class="item-info">
-                <div class="item-name" title="${item.path}">${item.name}</div>
+                <div class="item-name" title="${escapedPath}">${escapedName} ${tag}</div>
                 <div class="item-desc">${item.description || ''} ${item.consequence ? '— ' + item.consequence : ''}</div>
             </div>
             <div class="item-meta">
                 <span class="item-size">${item.size_human}</span>
                 <span class="item-safety" title="Safety: ${item.safety_score || '?'}/100">${safetyIcon(item.category)}</span>
-                <button class="item-ask" data-name="${item.name}" title="Ask about this">?</button>
+                <button class="item-ask" data-name="${escapedName}" title="Ask about this">?</button>
             </div>
         `;
         list.appendChild(row);
@@ -133,7 +156,6 @@ $('#btn-confirm-yes').addEventListener('click', async () => {
         const ok = data.success?.length || 0;
         const fail = data.failed?.length || 0;
 
-        // Remove deleted items from local state
         const deleted = new Set(data.success || []);
         scanResults = scanResults.filter(i => !deleted.has(i.path));
         renderResults();
