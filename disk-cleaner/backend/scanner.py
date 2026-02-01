@@ -69,7 +69,10 @@ def scan_location(path_str: str, category: str) -> list[dict]:
 
     items = []
 
-    if category == "personal" and path.name in ("Downloads", ".Trash"):
+    # Directories to always break down into top-level children
+    EXPAND_DIRS = {"Downloads", ".Trash", "Movies", "steamapps"}
+
+    if path.name in EXPAND_DIRS:
         # List individual top-level items with age info
         try:
             for entry in sorted(os.scandir(path), key=lambda e: e.stat(follow_symlinks=False).st_mtime):
@@ -121,8 +124,13 @@ def scan_location(path_str: str, category: str) -> list[dict]:
             return []
         sub_items = get_item_count(path)
 
-        # For caches, try to show per-app breakdown
-        if category == "safe" and path.name == "Caches":
+        # For large directories, show per-subfolder breakdown
+        BREAKDOWN_DIRS = {
+            "Caches", "DerivedData", "Archives", "iOS DeviceSupport",
+            "watchOS DeviceSupport", "tvOS DeviceSupport", "CoreSimulator",
+            "CacheStorage", "CachedData", "Cache", "caches", "repository",
+        }
+        if path.name in BREAKDOWN_DIRS or sub_items > 3:
             try:
                 for entry in os.scandir(path):
                     if entry.is_dir():
